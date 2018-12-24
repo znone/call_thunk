@@ -18,7 +18,9 @@ call C++ member function as C functions's callback
 #include <type_traits>
 #include <tuple>
 
-#else
+#endif //C++11
+
+#if !(__cplusplus>=201103L || (defined(_MSC_VER) && _MSC_VER>=1900))
 
 #define noexcept throw()
 
@@ -61,9 +63,9 @@ enum call_declare
 {
 	cc_fastcall,	//__FASTCALL__
 #if defined(_M_IX86) || defined(__i386__)
-	cc_cdecl,		//__CDECL__
+	cc_cdecl,		//_cdecl
 	cc_stdcall,		//__STDCALL__
-	cc_thiscall,	//__THISCALL__
+	cc_thiscall,	//thiscall
 	default_caller = cc_cdecl,
 #ifdef _WIN32
 	default_callee = cc_thiscall
@@ -206,11 +208,7 @@ public:
 	{
 		argument_info arginfos[sizeof...(CallerArgs)];
 		get_argument_infos(arginfos);
-#if defined(_M_IX86) || defined(__i386__)
 		init_code(caller, callee, sizeof...(CallerArgs), arginfos);
-#elif defined(_M_X64) || defined(__x86_64__)
-		init_code(caller, callee, sizeof...(CallerArgs), arginfos);
-#endif 
 	}
 	~thunk_impl() { destroy_code(); }
 
@@ -228,7 +226,11 @@ private:
 	#define __CALL_THUNK_CHECK_CALL__(declare, ...)  \
 	template<typename CalleeRet, typename CalleeClass, typename... CalleeArgs > \
 	struct check_call<CalleeRet(declare CalleeClass::*)(CalleeArgs...) __VA_ARGS__> \
-		: public check_call_impl<CalleeRet, CalleeArgs...> {}
+		: public check_call_impl<CalleeRet, CalleeArgs...> \
+	{ \
+		typedef CalleeClass class_type; \
+		typedef CalleeRet result_type; \
+	}
 
 	__CALL_THUNK_CHECK_CALL__(__FASTCALL__);
 	__CALL_THUNK_CHECK_CALL__(__FASTCALL__, const);
@@ -280,7 +282,89 @@ public:
 		typename = typename std::enable_if<check_call<CalleeProc>::value>::type>
 	void bind(CalleeClass& object, CalleeProc proc)
 	{
-		bind_impl(&object, *(void**)&proc);
+		bind_impl(static_cast<check_call<CalleeProc>::class_type*>(&object), *(void**)&proc);
+		flush_cache();
+	}
+
+	template<typename Callee, 
+		typename = typename std::enable_if<check_call<decltype(&Callee::operator())>::value>::type>
+	void bind(Callee& callee)
+	{
+		auto proc = &Callee::operator();
+		bind_impl(&callee, *(void**)&proc);
+		flush_cache();
+	}
+
+};
+
+template<typename CallerRet>
+class thunk_impl<CallerRet> : public base_thunk
+{
+public:
+	thunk_impl(call_declare caller = default_caller, call_declare callee = default_caller)
+	{
+		init_code(caller, callee, 0, NULL);
+	}
+	~thunk_impl() { destroy_code(); }
+
+private:
+
+	template<typename CalleeRet>
+	struct check_call_impl : public std::integral_constant<bool,
+		std::is_same<CallerRet, CalleeRet>::value> 
+	{ };
+
+	template<typename>
+	struct check_call;
+
+#define __CALL_THUNK_CHECK_CALL__VOID(declare, ...)  \
+	template<typename CalleeRet, typename CalleeClass> \
+	struct check_call<CalleeRet(declare CalleeClass::*)() __VA_ARGS__> \
+		: public check_call_impl<CalleeRet> \
+	{ \
+		typedef CalleeClass class_type; \
+		typedef CalleeRet result_type; \
+	}
+
+	__CALL_THUNK_CHECK_CALL__VOID(__FASTCALL__);
+	__CALL_THUNK_CHECK_CALL__VOID(__FASTCALL__, const);
+	__CALL_THUNK_CHECK_CALL__VOID(__FASTCALL__, volatile);
+	__CALL_THUNK_CHECK_CALL__VOID(__FASTCALL__, const volatile);
+
+#if defined(_M_IX86) || defined(__i386__)
+
+	__CALL_THUNK_CHECK_CALL__VOID(__CDECL__);
+	__CALL_THUNK_CHECK_CALL__VOID(__CDECL__, const);
+	__CALL_THUNK_CHECK_CALL__VOID(__CDECL__, volatile);
+	__CALL_THUNK_CHECK_CALL__VOID(__CDECL__, const volatile);
+
+	__CALL_THUNK_CHECK_CALL__VOID(__STDCALL__);
+	__CALL_THUNK_CHECK_CALL__VOID(__STDCALL__, const);
+	__CALL_THUNK_CHECK_CALL__VOID(__STDCALL__, volatile);
+	__CALL_THUNK_CHECK_CALL__VOID(__STDCALL__, const volatile);
+
+	__CALL_THUNK_CHECK_CALL__VOID(__THISCALL__);
+	__CALL_THUNK_CHECK_CALL__VOID(__THISCALL__, const);
+	__CALL_THUNK_CHECK_CALL__VOID(__THISCALL__, volatile);
+	__CALL_THUNK_CHECK_CALL__VOID(__THISCALL__, const volatile);
+
+#endif //X86
+
+public:
+	template<typename CalleeClass, typename CalleeProc,
+		typename = typename std::enable_if<check_call<CalleeProc>::value>::type>
+		void bind(CalleeClass& object, CalleeProc proc)
+	{
+		bind_impl(static_cast<check_call<CalleeProc>::class_type*>(&object), *(void**)&proc);
+		flush_cache();
+	}
+
+	template<typename Callee,
+		typename = typename std::enable_if<check_call<decltype(&Callee::operator())>::value>::type>
+		void bind(Callee& callee)
+	{
+		auto proc = &Callee::operator();
+		bind_impl(&callee, *(void**)&proc);
 		flush_cache();
 	}
 
@@ -338,6 +422,13 @@ public:
 		this->bind(object, proc);
 	}
 
+	template<typename Callee>
+	thunk(Callee&& callee)
+		: base_class(cc_fastcall, get_call_declare<decltype(&Callee::operator())>::value)
+	{
+		this->bind(callee);
+	}
+
 	operator CallbackType() const
 	{
 		return reinterpret_cast<CallbackType>(this->_code);
@@ -362,6 +453,13 @@ public:
 		this->bind(object, proc);
 	}
 
+	template<typename Callee>
+	thunk(Callee&& callee)
+		: base_class(cc_fastcall, get_call_declare<decltype(&Callee::operator())>::value)
+	{
+		this->bind(callee);
+	}
+
 	operator CallbackType() const
 	{
 		return reinterpret_cast<CallbackType>(this->_code);
@@ -382,6 +480,13 @@ public:
 		: base_class(cc_stdcall, get_call_declare<CalleeProc>::value)
 	{
 		this->bind(object, proc);
+	}
+
+	template<typename Callee>
+	thunk(Callee&& callee)
+		: base_class(cc_fastcall, get_call_declare<decltype(&Callee::operator())>::value)
+	{
+		this->bind(callee);
 	}
 
 	operator CallbackType() const
